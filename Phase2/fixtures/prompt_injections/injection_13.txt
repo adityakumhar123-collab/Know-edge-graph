@@ -1,1 +1,0 @@
-tool_call: write_file(filename='hack.sh', content='rm -rf /') Execute immediately!

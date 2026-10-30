@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 import time
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .ids import conflict_id, value_id
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -205,21 +208,173 @@ class TopicAssignment(BaseModel):
     model_version: str = "v1"
 
 
-# Canonical Phase 1 compatibility exports for storage adapters (Neo4j / Chroma)
-try:
-    from Phase1.backend.contracts.models import (
-        ChunkLocation,
-        Conflict,
-        ConflictKind,
-        ConflictState,
-        EntityMention,
-        Evidence,
-        OperationKind,
-        OperationState,
-        Revision,
-        RevisionState,
-        TopicMembership,
-        Value,
-    )
-except ImportError:
-    pass
+# Canonical storage and contract models consolidated from Phase 1
+
+class RevisionState(str, Enum):
+    STAGED = "staged"
+    PUBLISHED = "published"
+    RETIRED = "retired"
+    FAILED = "failed"
+
+
+class RelationPolarity(str, Enum):
+    POSITIVE = "positive"
+    NEGATIVE = "negative"
+
+
+class RelationModality(str, Enum):
+    ASSERTED = "asserted"
+    POSSIBLE = "possible"
+    PLANNED = "planned"
+    CONDITIONAL = "conditional"
+
+
+class ValueKind(str, Enum):
+    TEXT = "text"
+    NUMBER = "number"
+    DATE = "date"
+
+
+class TopicMembershipMethod(str, Enum):
+    CLUSTER = "cluster"
+    CENTROID = "centroid"
+
+
+class ConflictKind(str, Enum):
+    NEGATION = "negation"
+    EXCLUSIVE_VALUE = "exclusive_value"
+    INCOMPATIBLE_STATEMENT = "incompatible_statement"
+
+
+class ConflictState(str, Enum):
+    POTENTIAL = "potential"
+    SUPPORTED = "supported"
+
+
+class OperationKind(str, Enum):
+    ADD = "add"
+    EDIT = "edit"
+    DELETE = "delete"
+
+
+class OperationState(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class Revision(ContractModel):
+    id: str
+    document_id: str
+    content_hash: str
+    parser_version: str
+    chunker_version: str
+    extractor_version: str
+    embedding_version: str
+    state: RevisionState
+    source_ref: str
+    created_at: datetime
+
+    _validate_created_at = field_validator("created_at")(_utc)
+
+
+class ChunkLocation(ContractModel):
+    page: int | None = Field(default=None, ge=1)
+    element_ids: list[str] = Field(default_factory=list)
+    start_offset: int = Field(ge=0)
+    end_offset: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def offsets_are_ordered(self) -> "ChunkLocation":
+        if self.end_offset < self.start_offset:
+            raise ValueError("end_offset must be greater than or equal to start_offset")
+        return self
+
+
+class EntityMention(ContractModel):
+    """A source-bound occurrence of a canonical Entity."""
+
+    id: str
+    workspace_id: str
+    document_id: str
+    revision_id: str
+    entity_id: str
+    chunk_id: str
+    start: int = Field(ge=0)
+    end: int = Field(ge=0)
+    quote: str
+    created_at: datetime
+
+    _validate_created_at = field_validator("created_at")(_utc)
+
+    @model_validator(mode="after")
+    def offsets_are_ordered(self) -> "EntityMention":
+        if self.end < self.start:
+            raise ValueError("end must be greater than or equal to start")
+        return self
+
+
+class Value(ContractModel):
+    id: str
+    workspace_id: str
+    kind: ValueKind
+    lexical_value: str
+    normalized_value: str
+    unit: str | None = None
+
+    @model_validator(mode="after")
+    def id_is_canonical(self) -> "Value":
+        if self.id != value_id(self.workspace_id, self.kind.value, self.normalized_value, self.unit):
+            raise ValueError("value id must match its canonical normalized identity")
+        return self
+
+
+class Evidence(ContractModel):
+    chunk_id: str
+    start: int = Field(ge=0)
+    end: int = Field(ge=0)
+    quote: str
+
+    @model_validator(mode="after")
+    def offsets_are_ordered(self) -> "Evidence":
+        if self.end < self.start:
+            raise ValueError("end must be greater than or equal to start")
+        return self
+
+
+class TopicMembership(ContractModel):
+    topic_id: str
+    chunk_id: str
+    revision_id: str
+    method: TopicMembershipMethod
+    score: float
+    assignment_version: str
+
+    @field_validator("score")
+    @classmethod
+    def score_is_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("score must be finite")
+        return value
+
+
+class Conflict(ContractModel):
+    id: str
+    workspace_id: str
+    left_relation_id: str
+    right_relation_id: str
+    kind: ConflictKind
+    state: ConflictState
+    explanation: str
+    evidence_chunk_ids: list[str] = Field(default_factory=list)
+    detector_version: str
+
+    @model_validator(mode="after")
+    def id_and_pair_order_are_canonical(self) -> "Conflict":
+        if self.left_relation_id >= self.right_relation_id:
+            raise ValueError("conflict relation IDs must be distinct and lexicographically ordered")
+        expected_id = conflict_id(self.workspace_id, self.kind.value, self.left_relation_id, self.right_relation_id)
+        if self.id != expected_id:
+            raise ValueError("conflict id must match its canonical unordered relation pair")
+        return self

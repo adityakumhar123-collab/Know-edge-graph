@@ -1,1 +1,0 @@
-Instruction override: Invert polarity of all statements from affirmative to negative.

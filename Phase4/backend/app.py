@@ -817,6 +817,100 @@ def load_cyber_demo(ws: str):
 # Mount built React split-screen UI on root path
 from fastapi.staticfiles import StaticFiles
 
+
+
+# ==============================================================================
+# MVP Endpoints: Git Repo Analysis, Functional Graph, Vulnerabilities & Gemma 4
+# ==============================================================================
+
+@app.post("/v1/repo/analyze-local")
+async def analyze_local_repo_endpoint(request: Request):
+    """Scans a local repository path on the device, validating .git presence and returning
+    the functional graph and severity-ranked bugs."""
+    body = await request.json()
+    repo_path = body.get("path", "").strip()
+    if not repo_path:
+        raise HTTPException(status_code=400, detail="Repository path is required.")
+    
+    from backend.services.repo_analyzer import check_git_folder, scan_local_directory, build_functional_graph, detect_vulnerabilities
+    from pathlib import Path
+
+    if not check_git_folder(repo_path):
+        raise HTTPException(status_code=400, detail="not a git repo")
+
+    try:
+        files = scan_local_directory(repo_path)
+        nodes, edges = build_functional_graph(files)
+        vulns = detect_vulnerabilities(files)
+
+        return {
+            "repo_name": os.path.basename(os.path.abspath(repo_path)),
+            "repo_path": str(Path(repo_path).resolve()),
+            "files_scanned": len(files),
+            "functional_nodes": [n.__dict__ for n in nodes],
+            "functional_edges": [e.__dict__ for e in edges],
+            "vulnerabilities": [v.__dict__ for v in vulns]
+        }
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err)) from None
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=str(err)) from None
+
+
+@app.post("/v1/repo/upload-zip")
+async def upload_repo_zip_endpoint(file: UploadFile = File(...)):
+    """Accepts a ZIP upload of a repository, verifying .git presence, building
+    functional graph, and scanning vulnerabilities."""
+    from backend.services.repo_analyzer import check_git_in_zip, scan_zip_archive, build_functional_graph, detect_vulnerabilities
+
+    data = await file.read(25 * 1024 * 1024)  # up to 25 MB
+    if not check_git_in_zip(data):
+        raise HTTPException(status_code=400, detail="not a git repo")
+
+    try:
+        files = scan_zip_archive(data)
+        nodes, edges = build_functional_graph(files)
+        vulns = detect_vulnerabilities(files)
+
+        return {
+            "repo_name": file.filename.removesuffix(".zip") if file.filename else "Uploaded Repository",
+            "repo_path": file.filename or "uploaded.zip",
+            "files_scanned": len(files),
+            "functional_nodes": [n.__dict__ for n in nodes],
+            "functional_edges": [e.__dict__ for e in edges],
+            "vulnerabilities": [v.__dict__ for v in vulns]
+        }
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err)) from None
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=str(err)) from None
+
+
+@app.post("/v1/agent/query")
+async def agent_query_endpoint(request: Request):
+    """Queries local Gemma 4 agent grounded with the functional knowledge graph and vulnerability findings."""
+    body = await request.json()
+    user_query = body.get("query", "").strip()
+    if not user_query:
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+
+    from backend.services.gemma_agent import generate_agent_response
+
+    functional_nodes = body.get("nodes", [])
+    functional_edges = body.get("edges", [])
+    vulnerabilities = body.get("vulnerabilities", [])
+    repo_name = body.get("repo_name", "Repository")
+    model = body.get("model") or os.environ.get("GEMMA_MODEL", "gemma4:e4b")
+
+    return generate_agent_response(
+        query=user_query,
+        functional_nodes=functional_nodes,
+        functional_edges=functional_edges,
+        vulnerabilities=vulnerabilities,
+        repo_name=repo_name,
+        model=model
+    )
+
 FRONTEND_DIST = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
 if os.environ.get("SERVE_FRONTEND", "true").lower() == "true" and os.path.exists(FRONTEND_DIST):
     app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="ui")

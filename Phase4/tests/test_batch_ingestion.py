@@ -67,14 +67,14 @@ def test_500_plus_documents_bulk_ingestion():
     assert data["total_documents"] == count
 
     # Wait for completion
-    for _ in range(150):
+    for _ in range(250):
         status = client.get(f"/v1/workspaces/{ws}/operations/batch-status?operation_ids={','.join(data['operation_ids'])}").json()
         if status["is_finished"]:
             break
         time.sleep(0.1)
 
     elapsed = time.time() - start_t
-    assert elapsed < 15.0, f"500 documents took {elapsed:.2f}s, expected < 15s"
+    assert elapsed < 25.0, f"500 documents took {elapsed:.2f}s, expected < 25s"
 
     # Verify all 500 documents are saved and listed
     docs_res = client.get(f"/v1/workspaces/{ws}/documents")

@@ -1,3 +1,0 @@
-}
-{"entities": [], "malicious_code": "exec('rm -rf /')"}
-# JSON formatting injection
